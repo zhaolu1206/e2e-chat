@@ -60,10 +60,20 @@ git push -u origin main
 
 #### 2.2 进入 Pages 页面
 
+**重要**：Cloudflare Dashboard 默认显示 Workers，需要切换到 Pages！
+
 1. 在左侧导航栏，找到并点击 `Workers & Pages`
-2. 点击 `Create Application` 按钮
-3. 选择 `Pages` 标签页
-4. 点击 `Connect to Git` 按钮
+2. 在页面顶部，你会看到两个标签页：
+   - `Workers`（默认选中，橙色/蓝色）
+   - `Pages`（需要点击这个！）
+3. **点击 `Pages` 标签页**（在 Workers 标签旁边）
+4. 现在你应该看到 Pages 的界面
+5. 点击 `Create a project` 或 `Create Application` 按钮
+6. 点击 `Connect to Git` 按钮
+
+**如果看不到 Pages 标签**：
+- 确保你的账户已激活 Pages 功能
+- 尝试直接访问：https://dash.cloudflare.com/?to=/:account/pages
 
 #### 2.3 连接 GitHub 账户
 

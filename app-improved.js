@@ -10,6 +10,9 @@ class E2EGroupChat {
         this.isConnected = false;
         this.ws = null;
         this.useWebSocket = false; // 是否使用 WebSocket 信令服务器
+        this.selectedFiles = []; // 选中的文件
+        this.fileChunkSize = 16 * 1024; // 16KB 分块大小（DataChannel 限制）
+        this.pendingFileTransfers = new Map(); // 正在传输的文件
         
         this.initializeUI();
         this.setupEventListeners();
@@ -35,6 +38,12 @@ class E2EGroupChat {
         this.currentRoom = document.getElementById('current-room');
         this.currentUser = document.getElementById('current-user');
         this.loading = document.getElementById('loading');
+        this.fileBtn = document.getElementById('file-btn');
+        this.fileInput = document.getElementById('file-input');
+        this.filePreview = document.getElementById('file-preview');
+        this.uploadProgress = document.getElementById('upload-progress');
+        this.progressFill = document.getElementById('progress-fill');
+        this.progressText = document.getElementById('progress-text');
     }
 
     setupEventListeners() {
@@ -50,15 +59,36 @@ class E2EGroupChat {
             if (e.key === 'Enter') this.joinRoom();
         });
 
-        this.sendBtn.addEventListener('click', () => this.sendMessage());
-        this.messageInput.addEventListener('keypress', (e) => {
+        this.sendBtn.addEventListener('click', async () => {
+            // 如果有选中的文件，先发送文件
+            if (this.selectedFiles.length > 0) {
+                await this.sendFiles();
+            }
+            // 然后发送文本消息
+            this.sendMessage();
+        });
+        this.messageInput.addEventListener('keypress', async (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                // 如果有选中的文件，先发送文件
+                if (this.selectedFiles.length > 0) {
+                    await this.sendFiles();
+                }
+                // 然后发送文本消息
                 this.sendMessage();
             }
         });
 
         this.leaveBtn.addEventListener('click', () => this.leaveRoom());
+
+        // 文件上传
+        this.fileBtn.addEventListener('click', () => {
+            this.fileInput.click();
+        });
+
+        this.fileInput.addEventListener('change', (e) => {
+            this.handleFileSelect(e.target.files);
+        });
     }
 
     async joinRoom() {
@@ -100,6 +130,7 @@ class E2EGroupChat {
         this.updateConnectionStatus('已连接', 'connected');
         this.messageInput.disabled = false;
         this.sendBtn.disabled = false;
+        this.fileBtn.disabled = false;
     }
 
     getWebSocketUrl() {
@@ -396,7 +427,13 @@ class E2EGroupChat {
             try {
                 const encryptedData = JSON.parse(event.data);
                 const decryptedMessage = await this.decryptMessage(encryptedData, peerId);
-                this.displayMessage(decryptedMessage.username, decryptedMessage.content, false);
+                
+                // 处理不同类型的消息
+                if (decryptedMessage.type === 'file' || decryptedMessage.type === 'file-info') {
+                    this.displayFileMessage(decryptedMessage, false);
+                } else {
+                    this.displayMessage(decryptedMessage.username, decryptedMessage.content, false);
+                }
             } catch (error) {
                 console.error('消息解密错误:', error);
             }
@@ -476,6 +513,279 @@ class E2EGroupChat {
         }
 
         this.messageInput.value = '';
+    }
+
+    // 文件处理相关方法
+    async handleFileSelect(files) {
+        const maxFileSize = 10 * 1024 * 1024; // 10MB 限制
+        const maxFiles = 5; // 最多5个文件
+
+        if (files.length > maxFiles) {
+            alert(`最多只能选择 ${maxFiles} 个文件`);
+            return;
+        }
+
+        for (let file of files) {
+            if (file.size > maxFileSize) {
+                alert(`文件 ${file.name} 超过 10MB 限制`);
+                continue;
+            }
+
+            // 压缩图片
+            let processedFile = file;
+            if (file.type.startsWith('image/')) {
+                processedFile = await this.compressImage(file);
+            }
+
+            this.selectedFiles.push({
+                file: processedFile,
+                originalFile: file,
+                type: file.type,
+                name: file.name,
+                size: processedFile.size
+            });
+        }
+
+        this.updateFilePreview();
+    }
+
+    async compressImage(file) {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let width = img.width;
+                    let height = img.height;
+
+                    // 限制最大尺寸
+                    const maxDimension = 1920;
+                    if (width > maxDimension || height > maxDimension) {
+                        if (width > height) {
+                            height = (height / width) * maxDimension;
+                            width = maxDimension;
+                        } else {
+                            width = (width / height) * maxDimension;
+                            height = maxDimension;
+                        }
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    canvas.toBlob((blob) => {
+                        resolve(blob || file);
+                    }, file.type, 0.8); // 80% 质量
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    updateFilePreview() {
+        this.filePreview.innerHTML = '';
+        this.filePreview.classList.remove('hidden');
+
+        this.selectedFiles.forEach((fileData, index) => {
+            const item = document.createElement('div');
+            item.className = 'file-preview-item';
+
+            if (fileData.type.startsWith('image/')) {
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(fileData.file);
+                item.appendChild(img);
+            } else if (fileData.type.startsWith('video/')) {
+                const video = document.createElement('video');
+                video.src = URL.createObjectURL(fileData.file);
+                video.controls = true;
+                video.style.maxWidth = '150px';
+                video.style.maxHeight = '150px';
+                item.appendChild(video);
+            } else if (fileData.type.startsWith('audio/')) {
+                const audio = document.createElement('audio');
+                audio.src = URL.createObjectURL(fileData.file);
+                audio.controls = true;
+                item.appendChild(audio);
+            }
+
+            const info = document.createElement('div');
+            info.className = 'file-info';
+            info.textContent = `${fileData.name} (${this.formatFileSize(fileData.size)})`;
+            item.appendChild(info);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'file-remove';
+            removeBtn.textContent = '×';
+            removeBtn.onclick = () => {
+                this.selectedFiles.splice(index, 1);
+                this.updateFilePreview();
+            };
+            item.appendChild(removeBtn);
+
+            this.filePreview.appendChild(item);
+        });
+
+        if (this.selectedFiles.length === 0) {
+            this.filePreview.classList.add('hidden');
+        }
+    }
+
+    formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    async sendFiles() {
+        if (this.selectedFiles.length === 0) return;
+
+        for (const fileData of this.selectedFiles) {
+            await this.sendFile(fileData);
+        }
+
+        this.selectedFiles = [];
+        this.updateFilePreview();
+    }
+
+    async sendFile(fileData) {
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            const arrayBuffer = e.target.result;
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+            const message = {
+                type: 'file',
+                username: this.username,
+                fileType: fileData.type,
+                fileName: fileData.name,
+                fileSize: fileData.size,
+                fileData: base64,
+                timestamp: Date.now()
+            };
+
+            // 如果文件太大，需要分块传输
+            if (base64.length > this.fileChunkSize) {
+                await this.sendFileInChunks(message);
+            } else {
+                await this.sendFileMessage(message);
+            }
+        };
+        reader.readAsArrayBuffer(fileData.file);
+    }
+
+    async sendFileMessage(message) {
+        try {
+            const encrypted = await this.encryptMessage(message);
+            const encryptedData = JSON.stringify(encrypted);
+
+            let sent = false;
+            for (const [peerId, peer] of this.peers.entries()) {
+                if (peer.dataChannel && peer.dataChannel.readyState === 'open') {
+                    peer.dataChannel.send(encryptedData);
+                    sent = true;
+                }
+            }
+
+            if (sent) {
+                this.displayFileMessage(message, true);
+            } else {
+                this.addSystemMessage('文件发送失败，等待其他用户连接...');
+            }
+        } catch (error) {
+            console.error('发送文件错误:', error);
+            this.addSystemMessage('发送文件失败，请重试');
+        }
+    }
+
+    async sendFileInChunks(message) {
+        const fileId = Date.now() + Math.random();
+        const base64 = message.fileData;
+        const totalChunks = Math.ceil(base64.length / this.fileChunkSize);
+
+        // 发送文件信息
+        const fileInfo = {
+            type: 'file-info',
+            fileId: fileId,
+            fileName: message.fileName,
+            fileType: message.fileType,
+            fileSize: message.fileSize,
+            totalChunks: totalChunks,
+            username: this.username,
+            timestamp: message.timestamp
+        };
+
+        await this.sendFileMessage(fileInfo);
+
+        // 发送文件块
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * this.fileChunkSize;
+            const end = Math.min(start + this.fileChunkSize, base64.length);
+            const chunk = base64.substring(start, end);
+
+            const chunkMessage = {
+                type: 'file-chunk',
+                fileId: fileId,
+                chunkIndex: i,
+                chunkData: chunk,
+                totalChunks: totalChunks
+            };
+
+            await this.sendFileMessage(chunkMessage);
+            this.updateProgress((i + 1) / totalChunks * 100);
+        }
+
+        this.hideProgress();
+    }
+
+    updateProgress(percent) {
+        this.uploadProgress.classList.remove('hidden');
+        this.progressFill.style.width = percent + '%';
+        this.progressText.textContent = `上传中... ${Math.round(percent)}%`;
+    }
+
+    hideProgress() {
+        setTimeout(() => {
+            this.uploadProgress.classList.add('hidden');
+            this.progressFill.style.width = '0%';
+        }, 500);
+    }
+
+    displayFileMessage(message, isOwn) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${isOwn ? 'own' : ''}`;
+
+        const time = new Date(message.timestamp).toLocaleTimeString('zh-CN', {
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+
+        let mediaHtml = '';
+        if (message.type === 'file' && message.fileData) {
+            const dataUrl = `data:${message.fileType};base64,${message.fileData}`;
+            if (message.fileType.startsWith('image/')) {
+                mediaHtml = `<div class="message-media"><img src="${dataUrl}" alt="${message.fileName}"></div>`;
+            } else if (message.fileType.startsWith('video/')) {
+                mediaHtml = `<div class="message-media"><video controls><source src="${dataUrl}" type="${message.fileType}"></video></div>`;
+            } else if (message.fileType.startsWith('audio/')) {
+                mediaHtml = `<div class="message-media"><audio controls><source src="${dataUrl}" type="${message.fileType}"></audio></div>`;
+            }
+        }
+
+        messageDiv.innerHTML = `
+            <div class="message-header">
+                <span class="message-username">${this.escapeHtml(message.username)}</span>
+                <span class="message-time">${time}</span>
+            </div>
+            ${mediaHtml}
+            <div class="message-content">${this.escapeHtml(message.fileName)}</div>
+        `;
+
+        this.messagesContainer.appendChild(messageDiv);
+        this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
     }
 
     async sendMessageToPeer(peerId, message) {
@@ -571,6 +881,7 @@ class E2EGroupChat {
         this.messageInput.value = '';
         this.messageInput.disabled = true;
         this.sendBtn.disabled = true;
+        this.fileBtn.disabled = true;
         this.isConnected = false;
 
         this.peers.clear();
