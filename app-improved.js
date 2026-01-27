@@ -81,6 +81,43 @@ class E2EGroupChat {
 
         this.leaveBtn.addEventListener('click', () => this.leaveRoom());
 
+        // 手动连接
+        const connectPeerBtn = document.getElementById('connect-peer-btn');
+        const connectDialog = document.getElementById('connect-dialog');
+        const connectCancel = document.getElementById('connect-cancel');
+        const connectConfirm = document.getElementById('connect-confirm');
+        const myPeerIdInput = document.getElementById('my-peer-id');
+        const copyPeerIdBtn = document.getElementById('copy-peer-id');
+        const remotePeerIdInput = document.getElementById('remote-peer-id');
+
+        connectPeerBtn.addEventListener('click', () => {
+            myPeerIdInput.value = this.localPeerId;
+            connectDialog.classList.remove('hidden');
+        });
+
+        connectCancel.addEventListener('click', () => {
+            connectDialog.classList.add('hidden');
+            remotePeerIdInput.value = '';
+        });
+
+        copyPeerIdBtn.addEventListener('click', () => {
+            myPeerIdInput.select();
+            document.execCommand('copy');
+            this.addSystemMessage('Peer ID 已复制到剪贴板！');
+        });
+
+        connectConfirm.addEventListener('click', () => {
+            const remotePeerId = remotePeerIdInput.value.trim();
+            if (remotePeerId) {
+                this.connectToPeer(remotePeerId);
+                this.addSystemMessage(`正在连接到 ${remotePeerId.substring(0, 8)}...`);
+                connectDialog.classList.add('hidden');
+                remotePeerIdInput.value = '';
+            } else {
+                alert('请输入对方的 Peer ID');
+            }
+        });
+
         // 文件上传
         this.fileBtn.addEventListener('click', () => {
             this.fileInput.click();
@@ -127,10 +164,20 @@ class E2EGroupChat {
         }
 
         this.showLoading(false);
-        this.updateConnectionStatus('已连接', 'connected');
+        
+        // 立即启用输入（即使还没有连接，用户也可以输入）
         this.messageInput.disabled = false;
         this.sendBtn.disabled = false;
         this.fileBtn.disabled = false;
+        
+        // 等待一下确保连接建立
+        setTimeout(() => {
+            if (this.isConnected) {
+                this.updateConnectionStatus('已连接', 'connected');
+            } else {
+                this.updateConnectionStatus('等待连接...', 'connecting');
+            }
+        }, 1000);
     }
 
     getWebSocketUrl() {
@@ -242,12 +289,37 @@ class E2EGroupChat {
     }
 
     async startPeerDiscovery() {
-        this.setupPeerListener();
+        // 使用多种方法进行对等点发现
+        this.setupBroadcastChannel();
+        this.setupLocalStorageDiscovery();
+        this.setupPeerIdSharing();
         this.addSystemMessage('已加入房间。等待其他用户连接...');
         this.addSystemMessage('提示：将房间 ID 分享给其他人，他们可以使用相同的房间 ID 加入。');
+        this.addSystemMessage(`你的 Peer ID: ${this.localPeerId.substring(0, 8)}... (用于手动连接)`);
+    }
+    
+    setupPeerIdSharing() {
+        // 检查 URL 参数中是否有要连接的 peer ID
+        const urlParams = new URLSearchParams(window.location.search);
+        const connectToPeerId = urlParams.get('connect');
+        if (connectToPeerId) {
+            setTimeout(() => {
+                this.connectToPeer(connectToPeerId);
+                this.addSystemMessage(`正在连接到指定的用户...`);
+            }, 1000);
+        }
+        
+        // 添加一个按钮来显示和复制自己的 Peer ID
+        this.addPeerIdDisplay();
+    }
+    
+    addPeerIdDisplay() {
+        // 在状态栏添加 Peer ID 显示（可选，因为已经有手动连接按钮了）
+        // 如果需要，可以在这里添加
     }
 
-    setupPeerListener() {
+    setupBroadcastChannel() {
+        // 同浏览器标签页之间的发现
         if (typeof BroadcastChannel !== 'undefined') {
             this.broadcastChannel = new BroadcastChannel(`room-${this.roomId}`);
             
@@ -281,6 +353,131 @@ class E2EGroupChat {
                     });
                 }
             }, 3000);
+        }
+    }
+
+    setupLocalStorageDiscovery() {
+        // 跨设备发现：使用 localStorage + storage 事件
+        const storageKey = `room-${this.roomId}-peers`;
+        
+        // 保存自己的信息
+        const myInfo = {
+            peerId: this.localPeerId,
+            timestamp: Date.now()
+        };
+        
+        try {
+            const existingPeers = JSON.parse(localStorage.getItem(storageKey) || '[]');
+            // 清理过期的对等点（超过30秒）
+            const now = Date.now();
+            const activePeers = existingPeers.filter(p => (now - p.timestamp) < 30000);
+            
+            // 添加自己
+            const myIndex = activePeers.findIndex(p => p.peerId === this.localPeerId);
+            if (myIndex >= 0) {
+                activePeers[myIndex] = myInfo;
+            } else {
+                activePeers.push(myInfo);
+            }
+            
+            localStorage.setItem(storageKey, JSON.stringify(activePeers));
+            
+            // 尝试连接其他对等点
+            activePeers.forEach(peer => {
+                if (peer.peerId !== this.localPeerId && !this.peers.has(peer.peerId)) {
+                    // 延迟连接，避免同时发起连接
+                    setTimeout(() => {
+                        this.connectToPeer(peer.peerId);
+                    }, Math.random() * 1000);
+                }
+            });
+        } catch (e) {
+            console.error('localStorage 错误:', e);
+        }
+        
+        // 定期更新自己的时间戳
+        this.localStorageInterval = setInterval(() => {
+            try {
+                const existingPeers = JSON.parse(localStorage.getItem(storageKey) || '[]');
+                const now = Date.now();
+                const activePeers = existingPeers.filter(p => (now - p.timestamp) < 30000);
+                
+                const myIndex = activePeers.findIndex(p => p.peerId === this.localPeerId);
+                if (myIndex >= 0) {
+                    activePeers[myIndex] = { peerId: this.localPeerId, timestamp: now };
+                } else {
+                    activePeers.push({ peerId: this.localPeerId, timestamp: now });
+                }
+                
+                localStorage.setItem(storageKey, JSON.stringify(activePeers));
+                
+                // 检查新的对等点
+                activePeers.forEach(peer => {
+                    if (peer.peerId !== this.localPeerId && !this.peers.has(peer.peerId)) {
+                        this.connectToPeer(peer.peerId);
+                    }
+                });
+            } catch (e) {
+                console.error('localStorage 更新错误:', e);
+            }
+        }, 2000);
+        
+        // 监听其他标签页/窗口的 storage 事件
+        window.addEventListener('storage', (e) => {
+            if (e.key === storageKey && e.newValue) {
+                try {
+                    const peers = JSON.parse(e.newValue);
+                    const now = Date.now();
+                    peers.forEach(peer => {
+                        if (peer.peerId !== this.localPeerId && 
+                            (now - peer.timestamp) < 30000 &&
+                            !this.peers.has(peer.peerId)) {
+                            this.connectToPeer(peer.peerId);
+                        }
+                    });
+                } catch (e) {
+                    console.error('解析 storage 事件错误:', e);
+                }
+            }
+            
+            // 处理信令消息
+            if (e.key && e.key.startsWith(`room-${this.roomId}-signaling`) && e.newValue) {
+                try {
+                    const signalingData = JSON.parse(e.newValue);
+                    if (signalingData.peerId !== this.localPeerId) {
+                        this.handleSignalingFromStorage(signalingData);
+                    }
+                } catch (e) {
+                    console.error('解析信令消息错误:', e);
+                }
+            }
+        });
+        
+        // 定期检查信令消息（用于跨设备，因为 storage 事件只在同浏览器触发）
+        this.signalingCheckInterval = setInterval(() => {
+            try {
+                const signalingKey = `room-${this.roomId}-signaling`;
+                const signalingData = localStorage.getItem(signalingKey);
+                if (signalingData) {
+                    const data = JSON.parse(signalingData);
+                    if (data.peerId !== this.localPeerId && 
+                        (Date.now() - data.timestamp) < 5000) {
+                        this.handleSignalingFromStorage(data);
+                    }
+                }
+            } catch (e) {
+                // 忽略错误
+            }
+        }, 1000);
+    }
+    
+    handleSignalingFromStorage(data) {
+        if (data.type === 'offer' && data.targetPeerId === this.localPeerId) {
+            this.handleOffer(data);
+        } else if (data.type === 'answer' && data.targetPeerId === this.localPeerId) {
+            this.handleAnswer(data);
+        } else if (data.type === 'ice-candidate' && data.targetPeerId === this.localPeerId) {
+            this.handleIceCandidate(data);
         }
     }
 
@@ -399,6 +596,23 @@ class E2EGroupChat {
                 peerId: this.localPeerId
             });
         }
+        
+        // 同时通过 localStorage 发送（用于跨设备）
+        try {
+            const storageKey = `room-${this.roomId}-signaling`;
+            const signalingData = {
+                ...message,
+                peerId: this.localPeerId,
+                timestamp: Date.now()
+            };
+            localStorage.setItem(storageKey, JSON.stringify(signalingData));
+            // 触发 storage 事件（在同一浏览器的其他标签页）
+            setTimeout(() => {
+                localStorage.removeItem(storageKey);
+            }, 100);
+        } catch (e) {
+            // localStorage 可能不可用，忽略
+        }
     }
 
     setupDataChannel(channel, peerId) {
@@ -406,6 +620,11 @@ class E2EGroupChat {
             console.log(`数据通道已打开: ${peerId}`);
             this.isConnected = true;
             this.updateConnectionStatus('已连接', 'connected');
+            
+            // 启用输入和按钮
+            this.messageInput.disabled = false;
+            this.sendBtn.disabled = false;
+            this.fileBtn.disabled = false;
             
             // 发送队列中的消息
             while (this.messageQueue.length > 0) {
@@ -873,6 +1092,26 @@ class E2EGroupChat {
         }
         if (this.discoveryInterval) {
             clearInterval(this.discoveryInterval);
+        }
+        if (this.localStorageInterval) {
+            clearInterval(this.localStorageInterval);
+        }
+        if (this.signalingCheckInterval) {
+            clearInterval(this.signalingCheckInterval);
+        }
+        
+        // 清理 localStorage
+        try {
+            const storageKey = `room-${this.roomId}-peers`;
+            const existingPeers = JSON.parse(localStorage.getItem(storageKey) || '[]');
+            const updatedPeers = existingPeers.filter(p => p.peerId !== this.localPeerId);
+            if (updatedPeers.length > 0) {
+                localStorage.setItem(storageKey, JSON.stringify(updatedPeers));
+            } else {
+                localStorage.removeItem(storageKey);
+            }
+        } catch (e) {
+            console.error('清理 localStorage 错误:', e);
         }
 
         this.chatScreen.classList.remove('active');
