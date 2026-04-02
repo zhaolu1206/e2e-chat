@@ -431,11 +431,13 @@ async joinRoom(mode = 'join') {
 
    // 收到对方“存在”的通知：发起连接
    if (data.type === 'peer-announce' && data.peerId !== this.localPeerId) {
-    // 加入方：只连创建者（不再需要手动“连接设备”）
-    if (!this.isCreator && this.creatorPeerId && data.peerId === this.creatorPeerId) {
-     console.log('[join peer-announce from creator]', { creatorPeerId: data.peerId });
-     if (!this.peers.has(this.creatorPeerId)) {
-      await this.connectToPeer(this.creatorPeerId);
+    // 如果已经知道创建者 Peer ID，则忽略 peer-announce，避免多次协商冲突
+    if (!this.isCreator && this.creatorPeerId) return;
+
+    // 兜底：仅当还没获得 creatorPeerId 才使用 peer-announce 自动连接
+    if (!this.isCreator && !this.creatorPeerId) {
+     if (data.peerId) {
+      // 在没有 creatorPeerId 的情况下不做强制连接，保持兼容（防止错误连接）
      }
     }
    }
