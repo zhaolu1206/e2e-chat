@@ -108,7 +108,10 @@ class E2EGroupChat {
 
    await new Promise((resolve, reject) => {
     try {
-     this.ws = new WebSocket(wsUrl);
+     // Durable Object 版信令需要 roomId 才能路由到同一个 DO 实例
+     const u = new URL(wsUrl);
+     if (!u.searchParams.get('roomId')) u.searchParams.set('roomId', this.roomId);
+     this.ws = new WebSocket(u.toString());
     } catch (e) {
      reject(e);
      return;
@@ -703,10 +706,22 @@ async joinRoom(mode = 'join') {
 
   channel.onmessage = async (event) => {
    try {
-    const encryptedData = JSON.parse(event.data);
+    const rawEncrypted = event.data; // 原始加密包（string），用于创建者中继转发
+    const encryptedData = JSON.parse(rawEncrypted);
     const decryptedMessage = await this.decryptMessage(encryptedData);
     const type = decryptedMessage && decryptedMessage.type;
     const isOwn = decryptedMessage && decryptedMessage.username === this.username;
+
+    // 创建者作为中继：把加入者发来的“加密包”原样转发给其他加入者
+    // 这样加入者之间无需直连，也能互相看到消息/图片/文件（仍保持端到端加密）。
+    if (this.isCreator && !isOwn) {
+     for (const [otherPeerId, otherPeer] of this.peers.entries()) {
+      if (otherPeerId === peerId) continue; // 不回发给发送者
+      if (otherPeer?.dataChannel?.readyState === 'open') {
+       otherPeer.dataChannel.send(rawEncrypted);
+      }
+     }
+    }
 
     if (type === 'file' && decryptedMessage.fileData) {
      this.displayFileMessage(decryptedMessage, isOwn);

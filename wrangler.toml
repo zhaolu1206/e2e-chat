@@ -1,8 +1,13 @@
-name = "e2e-group-chat-signaling"
+name = "e2e-chat-signaling"
 main = "worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-04-02"
 
-[site]
-bucket = "./"
+[durable_objects]
+bindings = [
+  { name = "SIGNALING_ROOM", class_name = "SignalingRoom" }
+]
 
-pages_build_output_dir = "./"
+[[migrations]]
+tag = "v1"
+new_classes = ["SignalingRoom"]
+
