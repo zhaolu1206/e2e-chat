@@ -1,105 +1,117 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>端对端加密群聊 - 支持多媒体</title>
-    <link rel="stylesheet" href="styles.css">
-</head>
-<body>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
     <div class="container">
-        <header>
-            <h1>🔒 端对端加密群聊</h1>
-            <p class="subtitle">安全、私密、实时</p>
-        </header>
+      <header>
+        <h1>端对端加密群聊</h1>
+        <div class="subtitle">安全、私密、实时</div>
+      </header>
 
-        <!-- 登录界面 -->
-        <div id="login-screen" class="screen active">
-            <div class="card">
-                <h2>加入聊天室</h2>
-                <div class="form-group">
-                    <label for="username">你的昵称</label>
-                    <input type="text" id="username" placeholder="输入你的昵称" maxlength="20" required>
-                </div>
-                <div class="form-group">
-                    <label for="room-id">房间 ID</label>
-                    <input type="text" id="room-id" placeholder="输入或创建房间 ID" maxlength="20" required>
-                    <button type="button" id="generate-room" class="btn-secondary">生成随机房间 ID</button>
-                </div>
-                <button id="join-btn" class="btn-primary">加入聊天室</button>
+      <div id="login-screen" class="screen active">
+        <div class="card">
+          <h2>房间入口</h2>
+
+          <div class="form-group">
+            <label for="username">你的昵称</label>
+            <input id="username" type="text" placeholder="例如：小王" autocomplete="nickname" />
+          </div>
+
+          <div class="form-group">
+            <label for="room-id">房间 ID</label>
+            <div class="input-row" style="margin-top: 8px">
+              <input id="room-id" type="text" placeholder="例如：test123" />
+              <button id="generate-room" class="btn-secondary" type="button">生成随机房间 ID</button>
             </div>
+          </div>
+
+          <div class="input-row" style="flex-direction: column; align-items: stretch; gap: 10px; margin-top: 10px;">
+            <button id="create-btn" class="btn-secondary" type="button" style="width: 100%;">创建房间</button>
+            <button id="join-btn" class="btn-primary" type="button" style="width: 100%;">加入房间</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="chat-screen" class="screen">
+        <div class="chat-header">
+          <div class="room-info">
+            <div>
+              房间: <strong id="current-room"></strong>
+            </div>
+            <div>
+              用户: <strong id="current-user"></strong>
+            </div>
+          </div>
+
+          <div class="header-actions">
+            <button id="connect-peer-btn" class="btn-secondary" type="button">连接设备</button>
+            <button id="leave-btn" class="btn-secondary" type="button">离开房间</button>
+          </div>
         </div>
 
-        <!-- 聊天界面 -->
-        <div id="chat-screen" class="screen">
-            <div class="chat-header">
-                <div class="room-info">
-                    <span id="room-display">房间: <strong id="current-room"></strong></span>
-                    <span id="user-display">用户: <strong id="current-user"></strong></span>
-                </div>
-                <div class="header-actions">
-                    <button id="connect-peer-btn" class="btn-secondary" title="手动连接其他设备">连接设备</button>
-                    <button id="leave-btn" class="btn-secondary">离开房间</button>
-                </div>
-            </div>
-            
-            <!-- 手动连接对话框 -->
-            <div id="connect-dialog" class="dialog hidden">
-                <div class="dialog-content">
-                    <h3>手动连接其他设备</h3>
-                    <p>如果自动连接失败，可以手动输入对方的 Peer ID</p>
-                    <div class="form-group">
-                        <label>你的 Peer ID（分享给对方）:</label>
-                        <div class="peer-id-display">
-                            <input type="text" id="my-peer-id" readonly>
-                            <button id="copy-peer-id" class="btn-secondary">复制</button>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>对方的 Peer ID:</label>
-                        <input type="text" id="remote-peer-id" placeholder="输入对方的 Peer ID">
-                    </div>
-                    <div class="dialog-buttons">
-                        <button id="connect-confirm" class="btn-primary">连接</button>
-                        <button id="connect-cancel" class="btn-secondary">取消</button>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="chat-container">
-                <div id="messages" class="messages"></div>
-                <div class="status-bar" id="status-bar">
-                    <span id="connection-status">连接中...</span>
-                    <span id="peer-count">在线: 0</span>
-                </div>
+        <div class="chat-container">
+          <div id="messages" class="messages"></div>
+
+          <div id="status-bar" class="status-bar">
+            <span id="connection-status" class="connecting">连接中...</span>
+            <span id="peer-count">在线: 0</span>
+          </div>
+
+          <div class="input-area">
+            <div class="input-row">
+              <textarea id="message-input" placeholder="输入消息，Enter 发送，Shift+Enter 换行" rows="4"></textarea>
+              <button id="file-btn" class="btn-file" type="button" title="发送文件">📎</button>
+              <input id="file-input" type="file" multiple hidden />
+              <button id="send-btn" class="btn-primary" type="button" disabled>发送</button>
             </div>
 
-            <div class="input-area">
-                <div class="input-row">
-                    <button id="file-btn" class="btn-file" title="发送图片/视频/语音" disabled>
-                        <span>📎</span>
-                    </button>
-                    <input type="file" id="file-input" accept="image/*,video/*,audio/*" multiple style="display: none;">
-                    <input type="text" id="message-input" placeholder="输入消息..." maxlength="500" disabled>
-                    <button id="send-btn" class="btn-primary" disabled>发送</button>
-                </div>
-                <div id="file-preview" class="file-preview hidden"></div>
-                <div id="upload-progress" class="upload-progress hidden">
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="progress-fill"></div>
-                    </div>
-                    <span class="progress-text" id="progress-text">上传中...</span>
-                </div>
-            </div>
-        </div>
+            <div id="file-preview" class="file-preview hidden"></div>
 
-        <!-- 加载提示 -->
-        <div id="loading" class="loading hidden">
-            <div class="spinner"></div>
-            <p>正在连接...</p>
+            <div id="upload-progress" class="upload-progress hidden">
+              <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+              <div id="progress-text" class="progress-text">上传中... 0%</div>
+            </div>
+          </div>
         </div>
+      </div>
     </div>
 
-    <script type="module" src="app-improved.js"></script>
-</body>
+    <div id="connect-dialog" class="dialog hidden" role="dialog" aria-modal="true">
+      <div class="dialog-content">
+        <h3>手动连接其他设备</h3>
+        <p>如果自动连接失败，可以输入对方的 Peer ID 进行直连。</p>
+
+        <div class="form-group">
+          <label>你的 Peer ID（分享给对方）</label>
+          <div class="peer-id-display">
+            <input id="my-peer-id" type="text" readonly />
+            <button id="copy-peer-id" class="btn-secondary" type="button">复制</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="remote-peer-id">对方的 Peer ID</label>
+          <input id="remote-peer-id" type="text" placeholder="粘贴对方的 Peer ID" />
+        </div>
+
+        <div class="dialog-buttons">
+          <button id="connect-cancel" class="btn-secondary" type="button">取消</button>
+          <button id="connect-confirm" class="btn-primary" type="button">连接</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="loading" class="loading hidden" aria-live="polite">
+      <div class="spinner"></div>
+      <p>正在连接...</p>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
 </html>
+
