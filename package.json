@@ -1,18 +1,16 @@
 {
-  "name": "e2e-group-chat",
+  "name": "e2e-chat-vps",
   "version": "1.0.0",
-  "description": "端对端加密群聊 Web 应用",
-  "main": "index.html",
+  "description": "端对端加密群聊（VPS 部署版：静态站点 + WebSocket 信令）",
+  "private": true,
+  "main": "server.js",
   "scripts": {
-    "dev": "python3 -m http.server 8000",
-    "build": "echo 'No build step needed for static site'"
+    "start": "node server.js",
+    "dev": "PORT=8787 node server.js"
   },
-  "keywords": [
-    "e2e",
-    "chat",
-    "webrtc",
-    "encryption"
-  ],
-  "author": "",
-  "license": "MIT"
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.3"
+  }
 }
+

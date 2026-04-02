@@ -83,7 +83,13 @@ class E2EGroupChat {
   getSignalingUrl() {
    try {
     const params = new URLSearchParams(window.location.search);
-    return params.get('signal');
+    const signal = params.get('signal');
+    if (signal) return signal;
+
+    // VPS 部署推荐：默认使用同域 /ws
+    const isHttps = window.location.protocol === 'https:';
+    const wsScheme = isHttps ? 'wss:' : 'ws:';
+    return `${wsScheme}//${window.location.host}/ws`;
    } catch {
     return null;
    }
