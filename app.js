@@ -112,19 +112,36 @@ class E2EGroupChat {
    this.signalingUrl = wsUrl;
    this.signalingMode = true;
 
-   await new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
+      const timeoutMs = 5000;
+      const timer = setTimeout(() => {
+        try {
+          if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+            this.ws.close();
+          }
+        } catch {}
+        reject(new Error(`WebSocket 连接超时（${timeoutMs}ms）：${wsUrl}`));
+      }, timeoutMs);
+
     try {
      // Durable Object 版信令需要 roomId 才能路由到同一个 DO 实例
      const u = new URL(wsUrl);
      if (!u.searchParams.get('roomId')) u.searchParams.set('roomId', this.roomId);
      this.ws = new WebSocket(u.toString());
     } catch (e) {
+        clearTimeout(timer);
      reject(e);
      return;
     }
 
-    this.ws.onopen = () => resolve();
-    this.ws.onerror = (e) => reject(e);
+      this.ws.onopen = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.ws.onerror = (e) => {
+        clearTimeout(timer);
+        reject(e);
+      };
    });
 
    // 注册
@@ -384,9 +401,19 @@ async joinRoom(mode = 'join') {
  async startPeerDiscovery() {
   const wsUrl = this.getSignalingUrl();
   if (wsUrl) {
-   this.addSystemMessage('已启用跨设备信令，正在建立连接...');
-   await this.startWebSocketSignaling(wsUrl);
-   return;
+   this.addSystemMessage(`已启用跨设备信令，正在连接：${wsUrl}`);
+   try {
+    await this.startWebSocketSignaling(wsUrl);
+    this.addSystemMessage('信令服务器已连接。等待其他用户加入...');
+    return;
+   } catch (e) {
+    console.error('WebSocket 信令连接失败:', e);
+    this.addSystemMessage('信令服务器连接失败，将回退到本地模式（仅同设备/同浏览器可用）。');
+    this.signalingMode = false;
+    try { if (this.ws) this.ws.close(); } catch {}
+    this.ws = null;
+    // 继续走本地模式
+   }
   }
 
   // 本地模式：同浏览器标签页通信
