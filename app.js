@@ -24,6 +24,10 @@ class E2EGroupChat {
   this.ws = null;
   this.signalingUrl = null;
   this.signalingMode = false;
+  /** 主动关闭 WS（重连/离开）时不提示「信令已断开」 */
+  this._suppressWsDisconnectMessage = false;
+  this._reconnectingSignaling = false;
+  this._visibilityResumeTimer = null;
 
   this.initializeUI();
   this.setupEventListeners();
@@ -95,6 +99,47 @@ class E2EGroupChat {
    }
   }
 
+  /** 仅 localhost / 127.0.0.1 在 HTTP 下仍被浏览器视为可信任，其它 IP 的 HTTP 页面往往无法正常使用 WebRTC */
+  isLocalDevHost() {
+   const h = window.location.hostname;
+   return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+  }
+
+  warnIfInsecureWebRtc() {
+   if (window.isSecureContext) return;
+   if (this.isLocalDevHost()) return;
+   this.addSystemMessage(
+    '当前为 HTTP 访问（非 localhost）。手机 Safari、多数环境下 WebRTC 需要 HTTPS 才能建立连接，请用域名 + HTTPS（如 Nginx/Caddy 反代并申请证书）后再试。'
+   );
+  }
+
+  /**
+   * ICE：多路 STUN 提高可达性；可选 TURN（对称型 NAT 等场景必需）
+   * 用法：?turn=turn:你的服务器:3478&turnUser=用户名&turnPass=密码
+   */
+  getRtcConfiguration() {
+   const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.voipbuster.com' },
+    { urls: 'stun:stun.counterpath.com' }
+   ];
+   try {
+    const params = new URLSearchParams(window.location.search);
+    const turn = params.get('turn');
+    const turnUser = params.get('turnUser');
+    const turnPass = params.get('turnPass');
+    if (turn && turnUser != null && turnPass != null) {
+     iceServers.push({
+      urls: turn,
+      username: turnUser,
+      credential: turnPass
+     });
+    }
+   } catch {}
+   return { iceServers };
+  }
+
   sendSignalingMessage(message) {
    // WebSocket 模式：跨设备
    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -112,109 +157,195 @@ class E2EGroupChat {
    this.signalingUrl = wsUrl;
    this.signalingMode = true;
 
-    await new Promise((resolve, reject) => {
-      const timeoutMs = 5000;
-      const timer = setTimeout(() => {
-        try {
-          if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
-            this.ws.close();
-          }
-        } catch {}
-        reject(new Error(`WebSocket 连接超时（${timeoutMs}ms）：${wsUrl}`));
-      }, timeoutMs);
+   await new Promise((resolve, reject) => {
+    const timeoutMs = 15000;
+    const timer = setTimeout(() => {
+     try {
+      if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+       this.ws.close();
+      }
+     } catch {}
+     reject(new Error(`WebSocket 连接超时（${timeoutMs}ms）：${wsUrl}`));
+    }, timeoutMs);
 
+    let ws = null;
     try {
-     // Durable Object 版信令需要 roomId 才能路由到同一个 DO 实例
      const u = new URL(wsUrl);
      if (!u.searchParams.get('roomId')) u.searchParams.set('roomId', this.roomId);
-     this.ws = new WebSocket(u.toString());
+     ws = new WebSocket(u.toString());
+     this.ws = ws;
     } catch (e) {
-        clearTimeout(timer);
+     clearTimeout(timer);
      reject(e);
      return;
     }
 
-      this.ws.onopen = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      this.ws.onerror = (e) => {
-        clearTimeout(timer);
-        reject(e);
-      };
-   });
+    ws.onmessage = async (event) => {
+     let msg = null;
+     try {
+      msg = JSON.parse(event.data);
+     } catch {
+      return;
+     }
 
-   // 注册
-   if (this.isCreator) {
-    this.ws.send(JSON.stringify({
-     type: 'register-creator',
-     roomId: this.roomId,
-     creatorPeerId: this.localPeerId
-    }));
-   } else {
-    this.ws.send(JSON.stringify({
-     type: 'register-joiner',
-     roomId: this.roomId,
-     peerId: this.localPeerId
-    }));
-   }
+     if (!msg || msg.roomId !== this.roomId) return;
 
-   this.ws.onmessage = async (event) => {
-    let msg = null;
-    try {
-     msg = JSON.parse(event.data);
-    } catch {
-     return;
-    }
-
-    if (!msg || msg.roomId !== this.roomId) return;
-
-    if (msg.type === 'creator-peer-id') {
-     if (msg.creatorPeerId && !this.peers.has(msg.creatorPeerId)) {
+     if (msg.type === 'creator-peer-id') {
+      if (!msg.creatorPeerId) return;
       this.creatorPeerId = msg.creatorPeerId;
+      const existing = this.peers.get(msg.creatorPeerId);
+      const dcOpen = existing?.dataChannel?.readyState === 'open';
+      if (dcOpen) return;
+      if (existing) this.removePeer(msg.creatorPeerId);
       this.addSystemMessage('已连接到房间创建者，正在建立 P2P 连接...');
-      // joiner 负责 createOffer
+      this.updateConnectionStatus('正在建立加密通道...', 'connecting');
+      await this.connectToPeer(this.creatorPeerId);
+      return;
+     }
+
+     if (msg.type === 'offer' && msg.targetPeerId === this.localPeerId) {
+      await this.connectToPeer(msg.peerId, msg.offer);
+      return;
+     }
+
+     if (msg.type === 'answer' && msg.targetPeerId === this.localPeerId) {
+      const peer = this.peers.get(msg.peerId);
+      if (peer && peer.pc) {
+       await peer.pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+       await this.flushPendingIceCandidates(msg.peerId);
+      }
+      return;
+     }
+
+     if (msg.type === 'ice-candidate' && msg.targetPeerId === this.localPeerId && msg.candidate) {
+      const peerId = msg.peerId;
+      const peer = this.peers.get(peerId);
+      if (peer && peer.pc && peer.pc.remoteDescription) {
+       try {
+        await peer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+       } catch (e) {
+        console.error('ws addIceCandidate 失败:', e);
+       }
+      } else {
+       const list = this.pendingIceCandidates.get(peerId) || [];
+       list.push(msg.candidate);
+       this.pendingIceCandidates.set(peerId, list);
+      }
+      return;
+     }
+    };
+
+    ws.onclose = () => {
+     this.signalingMode = false;
+     if (this._suppressWsDisconnectMessage) {
+      this._suppressWsDisconnectMessage = false;
+      return;
+     }
+     this.addSystemMessage('信令服务器已断开，将无法跨设备连接。');
+    };
+
+    ws.onopen = () => {
+     clearTimeout(timer);
+     if (this.isCreator) {
+      ws.send(
+       JSON.stringify({
+        type: 'register-creator',
+        roomId: this.roomId,
+        creatorPeerId: this.localPeerId
+       })
+      );
+     } else {
+      ws.send(
+       JSON.stringify({
+        type: 'register-joiner',
+        roomId: this.roomId,
+        peerId: this.localPeerId
+       })
+      );
+     }
+     resolve();
+    };
+    ws.onerror = (e) => {
+     clearTimeout(timer);
+     reject(e);
+    };
+   });
+  }
+
+  hasOpenDataChannel() {
+   for (const peer of this.peers.values()) {
+    if (peer.dataChannel && peer.dataChannel.readyState === 'open') return true;
+   }
+   return false;
+  }
+
+  /** 从后台回到前台 / 网络恢复时：自动重连信令并重建 WebRTC */
+  scheduleResumeAfterBackground() {
+   if (this._visibilityResumeTimer) clearTimeout(this._visibilityResumeTimer);
+   this._visibilityResumeTimer = setTimeout(() => {
+    this._visibilityResumeTimer = null;
+    this.resumeSignalingAfterBackground();
+   }, 450);
+  }
+
+  async resumeSignalingAfterBackground() {
+   if (!this.chatScreen.classList.contains('active') || !this.roomId) return;
+   const wsUrl = this.getSignalingUrl();
+   if (!wsUrl) return;
+   if (this.hasOpenDataChannel()) return;
+   if (this._reconnectingSignaling) return;
+
+   this._reconnectingSignaling = true;
+   try {
+    // 信令仍连着，仅 P2P 失效（少见）
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+     this.addSystemMessage('检测到数据通道已断开，正在重新协商...');
+     for (const id of [...this.peers.keys()]) {
+      this.removePeer(id);
+     }
+     this.pendingIceCandidates.clear();
+     this.connectingPeers.clear();
+     if (!this.isCreator && this.creatorPeerId) {
       await this.connectToPeer(this.creatorPeerId);
      }
      return;
     }
 
-    if (msg.type === 'offer' && msg.targetPeerId === this.localPeerId) {
-     await this.connectToPeer(msg.peerId, msg.offer);
-     return;
-    }
-
-    if (msg.type === 'answer' && msg.targetPeerId === this.localPeerId) {
-     const peer = this.peers.get(msg.peerId);
-     if (peer && peer.pc) {
-      await peer.pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
-      await this.flushPendingIceCandidates(msg.peerId);
+    this.addSystemMessage('正在从后台恢复：重新连接信令...');
+    this._suppressWsDisconnectMessage = true;
+    try {
+     if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.close();
      }
-     return;
-    }
-
-    if (msg.type === 'ice-candidate' && msg.targetPeerId === this.localPeerId && msg.candidate) {
-     const peerId = msg.peerId;
-     const peer = this.peers.get(peerId);
-     if (peer && peer.pc && peer.pc.remoteDescription) {
-      try {
-       await peer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-      } catch (e) {
-       console.error('ws addIceCandidate 失败:', e);
-      }
-     } else {
-      const list = this.pendingIceCandidates.get(peerId) || [];
-      list.push(msg.candidate);
-      this.pendingIceCandidates.set(peerId, list);
-     }
-     return;
-    }
-   };
-
-   this.ws.onclose = () => {
+    } catch {}
+    this.ws = null;
     this.signalingMode = false;
-    this.addSystemMessage('信令服务器已断开，将无法跨设备连接。');
-   };
+
+    for (const id of [...this.peers.keys()]) {
+     this.removePeer(id);
+    }
+    this.pendingIceCandidates.clear();
+    this.connectingPeers.clear();
+
+    await this.startWebSocketSignaling(wsUrl);
+
+    if (this.isCreator) {
+     this.addSystemMessage('信令已恢复。其他成员切回前台后会自动重连；若未恢复，请对方也回到本页。');
+     this.updateConnectionStatus('信令已连接，等待他人加入', 'connecting');
+    } else {
+     this.addSystemMessage('信令已恢复，正在重新建立加密通道...');
+     this.updateConnectionStatus('正在建立加密通道...', 'connecting');
+     if (this.creatorPeerId) {
+      await this.connectToPeer(this.creatorPeerId);
+     }
+    }
+   } catch (e) {
+    console.error('resumeSignalingAfterBackground', e);
+    this.addSystemMessage('自动重连失败，请点击「离开房间」后使用同一房间号重新加入。');
+   } finally {
+    this._reconnectingSignaling = false;
+   }
   }
 
  setupEventListeners() {
@@ -302,6 +433,16 @@ class E2EGroupChat {
   this.fileInput.addEventListener('change', (e) => {
    this.handleFileSelect(e.target.files);
   });
+
+  document.addEventListener('visibilitychange', () => {
+   if (document.visibilityState === 'visible') {
+    this.scheduleResumeAfterBackground();
+   }
+  });
+  window.addEventListener('online', () => this.scheduleResumeAfterBackground());
+  window.addEventListener('pageshow', (e) => {
+   if (e.persisted) this.scheduleResumeAfterBackground();
+  });
  }
 
 async joinRoom(mode = 'join') {
@@ -368,7 +509,10 @@ async joinRoom(mode = 'join') {
   this.sendBtn.disabled = true;
   this.fileBtn.disabled = true;
   this.isConnected = false;
-  this.updateConnectionStatus('等待连接...', 'connecting');
+  // 创建者 + 信令已成功时，startPeerDiscovery 已设为「信令已连接，等待他人加入」，此处勿覆盖
+  if (!(this.signalingMode && this.isCreator)) {
+   this.updateConnectionStatus('等待连接...', 'connecting');
+  }
  }
 
  async initializeEncryption() {
@@ -399,12 +543,18 @@ async joinRoom(mode = 'join') {
  }
 
  async startPeerDiscovery() {
+  this.warnIfInsecureWebRtc();
   const wsUrl = this.getSignalingUrl();
   if (wsUrl) {
    this.addSystemMessage(`已启用跨设备信令，正在连接：${wsUrl}`);
    try {
     await this.startWebSocketSignaling(wsUrl);
-    this.addSystemMessage('信令服务器已连接。等待其他用户加入...');
+    if (this.isCreator) {
+     this.addSystemMessage('信令服务器已连接。房间已就绪，把链接或房间号发给其他人即可。');
+     this.updateConnectionStatus('信令已连接，等待他人加入', 'connecting');
+    } else {
+     this.addSystemMessage('信令服务器已连接。正在获取创建者信息...');
+    }
     return;
    } catch (e) {
     console.error('WebSocket 信令连接失败:', e);
@@ -595,12 +745,7 @@ async joinRoom(mode = 'join') {
   this.connectingPeers.add(remotePeerId);
 
   try {
-   const configuration = {
-    iceServers: [
-     { urls: 'stun:stun.l.google.com:19302' },
-     { urls: 'stun:stun1.l.google.com:19302' }
-    ]
-   };
+   const configuration = this.getRtcConfiguration();
 
    const pc = new RTCPeerConnection(configuration);
 
@@ -647,6 +792,16 @@ async joinRoom(mode = 'join') {
      this.removePeer(remotePeerId);
      this.addSystemMessage(`用户 ${remotePeerId.substring(0, 8)}... 已断开`);
      this.updatePeerCountAndConnectionState();
+    }
+   };
+
+   pc.oniceconnectionstatechange = () => {
+    const s = pc.iceConnectionState;
+    console.log('[ice]', remotePeerId.substring(0, 8), s);
+    if (s === 'failed') {
+     this.addSystemMessage(
+      'P2P 打洞失败（ICE failed）。请使用 HTTPS 访问页面；若仍失败，多为 NAT 限制，需自建 TURN 服务，并在地址栏追加 &turn=...&turnUser=...&turnPass=...'
+     );
     }
    };
 
@@ -1400,6 +1555,16 @@ async joinRoom(mode = 'join') {
   for (const [peerId] of this.peers.entries()) {
    this.removePeer(peerId);
   }
+
+  this._suppressWsDisconnectMessage = true;
+  try {
+   if (this.ws) {
+    this.ws.onclose = null;
+    this.ws.close();
+   }
+  } catch {}
+  this.ws = null;
+  this.signalingMode = false;
 
   // 清理
   try {
